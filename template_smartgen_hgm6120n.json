@@ -1,0 +1,918 @@
+{
+  "zabbix_export": {
+    "version": "7.4",
+    "template_groups": [
+      {
+        "uuid": "e13bffb92f934b5d883be7368bd41ee3",
+        "name": "Templates"
+      }
+    ],
+    "templates": [
+      {
+        "uuid": "afc367e6e5dd43f186da1f3d62e6c55e",
+        "template": "SmartGen_HGM6120N",
+        "name": "SmartGen HGM6120N genset controller (Modbus)",
+        "description": "SmartGen HGM6120N/NC — контроллер генераторной установки, данные по Modbus TCP.\n\nЧто внутри: 42 item'а (напряжения сети и генератора, частоты, токи, мощности, давление масла, температура ОЖ, уровень топлива, обороты, напряжение АКБ, наработка, состояние автоматики) и 14 триггеров.\n\nПеред использованием задайте макросы на хосте: {$HGM.HOST} — адрес контроллера, {$HGM.PORT} — порт (502), {$HGM.SLAVE} — slave ID (1).\n\nПрактика, ради которой шаблон и делался:\n- Давление масла и обороты опрашиваются разными item'ами, поэтому на остановке масло успевает отдать 0, а обороты ещё держат прошлое значение. Триггеры по маслу используют окно 3 минуты (max/min), иначе получаются ложные срабатывания на каждом пуске и остановке.\n- Восстановление аварий по маслу учитывает остановку двигателя (rpm<={$HGM.RPM.RUNNING}), иначе проблема висит до следующего пуска.\n- Порог «высокого» давления = 800 кПа: это давление открытия редукционного клапана 6105 по мануалу (0.8 МПа), а не «на глаз».",
+        "groups": [
+          {
+            "name": "Templates"
+          }
+        ],
+        "macros": [
+          {
+            "macro": "{$HGM.HOST}",
+            "value": "192.168.1.10",
+            "description": "IP контроллера HGM6120N/NC"
+          },
+          {
+            "macro": "{$HGM.PORT}",
+            "value": "502",
+            "description": "TCP-порт Modbus (по умолчанию 502)"
+          },
+          {
+            "macro": "{$HGM.SLAVE}",
+            "value": "1",
+            "description": "Modbus slave ID контроллера"
+          },
+          {
+            "macro": "{$HGM.RPM.RUNNING}",
+            "value": "500",
+            "description": "Обороты, выше которых двигатель считается работающим"
+          },
+          {
+            "macro": "{$HGM.OIL.LOW}",
+            "value": "250",
+            "description": "Давление масла, кПа: ниже — проблема (все {$HGM.WINDOW})"
+          },
+          {
+            "macro": "{$HGM.OIL.LOW.REC}",
+            "value": "300",
+            "description": "Давление масла, кПа: восстановление"
+          },
+          {
+            "macro": "{$HGM.OIL.HIGH}",
+            "value": "800",
+            "description": "Давление масла, кПа: выше — проблема (упор в редукционный клапан)"
+          },
+          {
+            "macro": "{$HGM.OIL.HIGH.REC}",
+            "value": "700",
+            "description": "Давление масла, кПа: восстановление для высокой"
+          },
+          {
+            "macro": "{$HGM.TEMP.HIGH}",
+            "value": "95",
+            "description": "Температура ОЖ, °C: проблема"
+          },
+          {
+            "macro": "{$HGM.TEMP.HIGH.REC}",
+            "value": "90",
+            "description": "Температура ОЖ, °C: восстановление"
+          },
+          {
+            "macro": "{$HGM.FUEL.LOW}",
+            "value": "30",
+            "description": "Уровень топлива, %: проблема"
+          },
+          {
+            "macro": "{$HGM.FUEL.LOW.REC}",
+            "value": "50",
+            "description": "Уровень топлива, %: восстановление"
+          },
+          {
+            "macro": "{$HGM.BATT.LOW}",
+            "value": "25",
+            "description": "Напряжение АКБ, В: проблема"
+          },
+          {
+            "macro": "{$HGM.BATT.LOW.REC}",
+            "value": "25.5",
+            "description": "Напряжение АКБ, В: восстановление"
+          },
+          {
+            "macro": "{$HGM.GEN.VOLTAGE}",
+            "value": "180",
+            "description": "Напряжение генератора, В: выдаёт напряжение"
+          },
+          {
+            "macro": "{$HGM.GEN.VOLTAGE.REC}",
+            "value": "50",
+            "description": "Напряжение генератора, В: восстановление"
+          }
+        ],
+        "items": [
+          {
+            "name": "Maintenance Summary",
+            "type": "CALCULATED",
+            "key": "maintenance.summary",
+            "delay": "1h",
+            "value_type": "TEXT",
+            "params": "last(/SmartGen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,43,3,uint16,be])",
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "// value - это сырое значение Engine Runtime в СЕКУНДАХ\nvar seconds = parseFloat(value);\nif (isNaN(seconds)) { \n    return \"Ошибка: нет данных о моточасах\"; \n}\n\n// Переводим секунды в часы\nvar hours = seconds / 3600;\n\nvar text = \"=== СТАТУС ТЕХНИЧЕСКОГО ОБСЛУЖИВАНИЯ ===\\n\\n\";\ntext += \"Текущая наработка: \" + hours.toFixed(1) + \" ч.\\n\\n\";\n\n// Интервалы ТО согласно инструкции (стр. 62-65)\nvar intervals = [250, 500, 1000];\n\nintervals.forEach(function(interval) {\n    // Вычисляем остаток до следующего интервала\n    var rem = interval - (hours % interval);\n    \n    // Если остаток равен самому интервалу, значит мы ровно на отметке (например, 250)\n    if (rem === interval) { rem = 0; }\n\n    text += \"До ТО-\" + interval + \"ч: \";\n    \n    if (rem <= 20) {\n        text += \"⚠️ ВЫПОЛНИТЬ В БЛИЖАЙШЕЕ ВРЕМЯ (осталось \" + rem.toFixed(1) + \" ч.)\\n\";\n    } else if (rem <= 50) {\n        text += \"🟡 Скоро (осталось \" + rem.toFixed(1) + \" ч.)\\n\";\n    } else {\n        text += \"🟢 В норме (осталось \" + rem.toFixed(1) + \" ч.)\\n\";\n    }\n});\n\ntext += \"\\n=== ПРОВЕРИТЬ ЗАКУПКУ РАСХОДНИКОВ ===\\n\";\ntext += \"• Масло моторное 10W40 (18 л)\\n\";\ntext += \"• Фильтр масляный (JX0818)\\n\";\ntext += \"• Фильтр топливный (CS0708B)\\n\";\ntext += \"• Фильтр воздушный (K2139)\\n\";\ntext += \"• Ремень генератора\\n\";\ntext += \"\\n⚠️ ВАЖНО: Не забывайте про ежегодное ТО (не реже 1 раза в год), независимо от наработки!\";\n\nreturn text;"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Common Alarm",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,0,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Common Alarm Status"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,0,1,bit,be])=1",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,0,1,bit,be])=0",
+                "name": "Общая авария генератора",
+                "priority": "HIGH",
+                "description": "Активен общий сигнал аварии контроллера.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Common Shutdown",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,2,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Common Shutdown Status"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,2,1,bit,be])=1",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,2,1,bit,be])=0",
+                "name": "Аварийное отключение генератора",
+                "priority": "DISASTER",
+                "description": "Контроллер выполнил аварийное отключение генераторной установки.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Mains On-load",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,6,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Load Status"
+            }
+          },
+          {
+            "name": "Gen On-load",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,7,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Load Status"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,7,1,bit,be])=1",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,7,1,bit,be])=0",
+                "name": "Генератор взял нагрузку",
+                "priority": "INFO",
+                "description": "АВР переключил нагрузку на генератор.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Emergency Stop",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,8,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Emergency Stop Status"
+            }
+          },
+          {
+            "name": "In Auto Mode",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,41,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Auto Mode"
+            }
+          },
+          {
+            "name": "In Manual Mode",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,42,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Manual Mode"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,42,1,bit,be])=1",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,42,1,bit,be])=0",
+                "name": "Генератор не в авторежиме (переведён в ручной)",
+                "priority": "HIGH",
+                "description": "Контроллер генератора находится в режиме ручного запуска.\nАвтоматический запуск при пропаже сети невозможен",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "In Stop Mode",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,43,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Stop Mode"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,43,1,bit,be])=1",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,43,1,bit,be])=0",
+                "name": "Генератор в режиме СТОП (автозапуск отключён)",
+                "priority": "HIGH",
+                "description": "Контроллер генератора находится в режиме СТОП. Автоматический запуск при пропаже сети невозможен. Если это плановое ТО — проигнорируйте; если нет — переведите контроллер в АВТО.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Emergency Stop Input",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,48,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "Emergency Stop Status"
+            }
+          },
+          {
+            "name": "Mains OK",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,65,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "OK Status"
+            },
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,65,1,bit,be])=0",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,65,1,bit,be])=1",
+                "name": "Пропало напряжение сети",
+                "priority": "WARNING",
+                "description": "Сеть вышла за допустимые пределы (потеря фазы, перенапряжение, пониженное напряжение).",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Gen OK",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,72,1,bit,be]",
+            "trends": "0",
+            "valuemap": {
+              "name": "OK Status"
+            }
+          },
+          {
+            "name": "Mains Ua",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,0,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Ub",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,1,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Uc",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,2,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Uab",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,3,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Ubc",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,4,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Uca",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,5,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Mains Frequency",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,6,1,uint16,be]",
+            "value_type": "FLOAT",
+            "trends": "0",
+            "units": "Hz",
+            "preprocessing": [
+              {
+                "type": "MULTIPLIER",
+                "parameters": [
+                  "0.1"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Gen Ua",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,7,1,uint16,be]",
+            "trends": "0",
+            "units": "V",
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,7,1,uint16,be])>{$HGM.GEN.VOLTAGE}",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,7,1,uint16,be])<{$HGM.GEN.VOLTAGE.REC}",
+                "name": "Генератор запустился и выдаёт напряжение",
+                "priority": "INFO",
+                "description": "Генератор вышел на рабочий режим: напряжение на фазе U > 180 В.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Gen Ub",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,8,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Gen Uc",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,9,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Gen Uab",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,10,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Gen Ubc",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,11,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Gen Uca",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,12,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Gen Frequency",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,13,1,uint16,be]",
+            "value_type": "FLOAT",
+            "trends": "0",
+            "units": "Hz",
+            "preprocessing": [
+              {
+                "type": "MULTIPLIER",
+                "parameters": [
+                  "0.1"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "A Phase Current",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,14,1,uint16,be]",
+            "trends": "0",
+            "units": "A"
+          },
+          {
+            "name": "B Phase Current",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,15,1,uint16,be]",
+            "trends": "0",
+            "units": "A"
+          },
+          {
+            "name": "C Phase Current",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,16,1,uint16,be]",
+            "trends": "0",
+            "units": "A"
+          },
+          {
+            "name": "Water Temperature",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,17,1,uint16,be]",
+            "trends": "0",
+            "units": "°C",
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,17,1,uint16,be])>={$HGM.TEMP.HIGH}",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,17,1,uint16,be])<{$HGM.TEMP.HIGH.REC}",
+                "name": "Высокая температура охлаждающей жидкости",
+                "priority": "HIGH",
+                "description": "Температура ОЖ достигла 95 °C. Порог аварийного останова — 98 °C.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Oil Pressure",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,19,1,uint16,be]",
+            "trends": "0",
+            "units": "kPa"
+          },
+          {
+            "name": "Fuel Level",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,21,1,uint16,be]",
+            "trends": "0",
+            "units": "%",
+            "triggers": [
+              {
+                "expression": "nodata(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,21,1,uint16,be],5m)=1",
+                "name": "Контроллер генератора недоступен",
+                "priority": "DISASTER",
+                "description": "Нет данных от контроллера генератора по Modbus в течение 5 минут. Возможные причины: обрыв связи, отключение питания, неисправность контроллера."
+              },
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,21,1,uint16,be])<{$HGM.FUEL.LOW}",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,21,1,uint16,be])>{$HGM.FUEL.LOW.REC}",
+                "name": "Низкий уровень топлива",
+                "priority": "WARNING",
+                "description": "Уровень топлива в баке ниже 15%. Требуется дозаправка.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Engine Speed",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,23,1,uint16,be]",
+            "trends": "0",
+            "units": "RPM"
+          },
+          {
+            "name": "Battery Voltage",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,24,1,uint16,be]",
+            "value_type": "FLOAT",
+            "trends": "0",
+            "units": "V",
+            "preprocessing": [
+              {
+                "type": "MULTIPLIER",
+                "parameters": [
+                  "0.1"
+                ]
+              }
+            ],
+            "triggers": [
+              {
+                "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,24,1,uint16,be])<{$HGM.BATT.LOW}",
+                "recovery_mode": "RECOVERY_EXPRESSION",
+                "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,24,1,uint16,be])>{$HGM.BATT.LOW.REC}",
+                "name": "Низкое напряжение аккумулятора",
+                "priority": "WARNING",
+                "description": "Напряжение пусковой батареи ниже 25 В. Возможны проблемы с запуском.",
+                "dependencies": [
+                  {
+                    "name": "Контроллер генератора недоступен",
+                    "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "name": "D+ Voltage",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,25,1,uint16,be]",
+            "value_type": "FLOAT",
+            "trends": "0",
+            "units": "V",
+            "preprocessing": [
+              {
+                "type": "MULTIPLIER",
+                "parameters": [
+                  "0.1"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Active Power",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,26,1,uint16,be]",
+            "trends": "0",
+            "units": "kW"
+          },
+          {
+            "name": "Reactive Power",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,27,1,uint16,be]",
+            "trends": "0",
+            "units": "kvar"
+          },
+          {
+            "name": "Apparent Power",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,28,1,uint16,be]",
+            "trends": "0",
+            "units": "kVA"
+          },
+          {
+            "name": "Power Factor",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,29,1,uint16,be]",
+            "value_type": "FLOAT",
+            "trends": "0",
+            "preprocessing": [
+              {
+                "type": "MULTIPLIER",
+                "parameters": [
+                  "0.01"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "Maintenance Countdown (h)",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,30,1,uint16,be]",
+            "trends": "0",
+            "units": "h"
+          },
+          {
+            "name": "Maintenance Countdown (min)",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,31,1,uint16,be]",
+            "trends": "0",
+            "units": "min"
+          },
+          {
+            "name": "Battery Pack Voltage",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,32,1,uint16,be]",
+            "trends": "0",
+            "units": "V"
+          },
+          {
+            "name": "Engine Runtime",
+            "key": "modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,43,3,uint16,be]",
+            "units": "uptime",
+            "description": "Наработанное время (моточасы)",
+            "preprocessing": [
+              {
+                "type": "JAVASCRIPT",
+                "parameters": [
+                  "var raw = String(value).replace(\"[\", \"\").replace(\"]\", \"\");\nvar p = raw.split(\",\");\nvar h = Number(p[0]);\nvar m = Number(p[1]);\nvar s = Number(p[2]);\nreturn h * 3600 + m * 60 + s;"
+                ]
+              }
+            ]
+          }
+        ],
+        "triggers": [
+          {
+            "expression": "min(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,19,1,uint16,be],3m)>{$HGM.OIL.HIGH} and min(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,23,1,uint16,be],3m)>{$HGM.RPM.RUNNING}",
+            "recovery_mode": "RECOVERY_EXPRESSION",
+            "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,19,1,uint16,be])<{$HGM.OIL.HIGH.REC} or last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,23,1,uint16,be])<={$HGM.RPM.RUNNING}",
+            "name": "Высокое давление масла",
+            "priority": "WARNING",
+            "description": "Норма до 5.5 бар; редукционный клапан открывается при 8.0 бар (MMR4-6105, §1.4, §9.2). Порог 8.0 бар с подтверждением 3 минуты, восстановление 7.0 бар. Возможные причины: забит масляный фильтр, неисправен редукционный клапан. Риск выдавливания сальников.",
+            "dependencies": [
+              {
+                "name": "Контроллер генератора недоступен",
+                "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+              }
+            ]
+          },
+          {
+            "expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,8,1,bit,be])=1 or last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,48,1,bit,be])=1",
+            "recovery_mode": "RECOVERY_EXPRESSION",
+            "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,8,1,bit,be])=0 and last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},1,48,1,bit,be])=0",
+            "name": "Нажата кнопка аварийного останова",
+            "priority": "DISASTER",
+            "description": "Сработал аварийный останов (кнопка или вход). Требуется сброс: отпустить кнопку и нажать Стоп/Сброс.",
+            "dependencies": [
+              {
+                "name": "Контроллер генератора недоступен",
+                "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+              }
+            ]
+          },
+          {
+            "expression": "max(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,19,1,uint16,be],3m)<{$HGM.OIL.LOW} and min(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,23,1,uint16,be],3m)>{$HGM.RPM.RUNNING}",
+            "recovery_mode": "RECOVERY_EXPRESSION",
+            "recovery_expression": "last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,19,1,uint16,be])>={$HGM.OIL.LOW.REC} or last(/SmartGen_HGM6120N/modbus.get[tcp://{$HGM.HOST}:{$HGM.PORT},{$HGM.SLAVE},3,23,1,uint16,be])<={$HGM.RPM.RUNNING}",
+            "name": "Низкое давление масла",
+            "priority": "HIGH",
+            "description": "Норма 3.0–5.5 бар (0.3–0.55 МПа) на номинале, холостой ход ≥1.0 бар. Порог 2.5 бар, восстановление 3.0 бар. MMR4-6105, §1.4 Возможные причины: износ вкладышей, утечка, мало масла, неисправен насос.",
+            "manual_close": "YES",
+            "dependencies": [
+              {
+                "name": "Контроллер генератора недоступен",
+                "expression": "nodata(/Smartgen_HGM6120N/modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be],5m)=1"
+              }
+            ]
+          }
+        ],
+        "valuemaps": [
+          {
+            "name": "Auto Mode",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "-"
+              },
+              {
+                "value": "1",
+                "newvalue": "Авто"
+              }
+            ]
+          },
+          {
+            "name": "Common Alarm Status",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "Нет"
+              },
+              {
+                "value": "1",
+                "newvalue": "АВАРИЯ"
+              }
+            ]
+          },
+          {
+            "name": "Common Shutdown Status",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "Нет"
+              },
+              {
+                "value": "1",
+                "newvalue": "ОТКЛЮЧЕНИЕ"
+              }
+            ]
+          },
+          {
+            "name": "Emergency Stop Status",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "Нет"
+              },
+              {
+                "value": "1",
+                "newvalue": "СРАБОТАЛ"
+              }
+            ]
+          },
+          {
+            "name": "Load Status",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "Нет"
+              },
+              {
+                "value": "1",
+                "newvalue": "Под нагрузкой"
+              }
+            ]
+          },
+          {
+            "name": "Manual Mode",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "-"
+              },
+              {
+                "value": "1",
+                "newvalue": "Ручной"
+              }
+            ]
+          },
+          {
+            "name": "OK Status",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "Не в норме"
+              },
+              {
+                "value": "1",
+                "newvalue": "В норме"
+              }
+            ]
+          },
+          {
+            "name": "Stop Mode",
+            "mappings": [
+              {
+                "value": "0",
+                "newvalue": "-"
+              },
+              {
+                "value": "1",
+                "newvalue": "Стоп"
+              }
+            ]
+          }
+        ],
+        "graphs": [
+          {
+            "name": "Battery Voltage",
+            "width": "600",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "graph_items": [
+              {
+                "color": "FF0000",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,24,1,uint16,be]"
+                }
+              },
+              {
+                "color": "00FF00",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,25,1,uint16,be]"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Engine Parameters",
+            "width": "600",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "graph_items": [
+              {
+                "color": "FF0000",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,17,1,uint16,be]"
+                }
+              },
+              {
+                "color": "00FF00",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,19,1,uint16,be]"
+                }
+              },
+              {
+                "color": "0000FF",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,23,1,uint16,be]"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Frequency",
+            "width": "600",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "graph_items": [
+              {
+                "color": "FF0000",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,6,1,uint16,be]"
+                }
+              },
+              {
+                "color": "00FF00",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,13,1,uint16,be]"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Fuel level",
+            "width": "200",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "ymin_type_1": "FIXED",
+            "ymax_type_1": "FIXED",
+            "graph_items": [
+              {
+                "color": "199C0D",
+                "calc_fnc": "ALL",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,21,1,uint16,be]"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Generator Currents",
+            "width": "600",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "graph_items": [
+              {
+                "color": "FF0000",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,14,1,uint16,be]"
+                }
+              },
+              {
+                "color": "00FF00",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,15,1,uint16,be]"
+                }
+              },
+              {
+                "color": "0000FF",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,16,1,uint16,be]"
+                }
+              }
+            ]
+          },
+          {
+            "name": "Generator Voltages",
+            "width": "600",
+            "show_work_period": "NO",
+            "show_triggers": "NO",
+            "graph_items": [
+              {
+                "color": "FF0000",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,7,1,uint16,be]"
+                }
+              },
+              {
+                "color": "00FF00",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,8,1,uint16,be]"
+                }
+              },
+              {
+                "color": "0000FF",
+                "item": {
+                  "host": "Smartgen_HGM6120N",
+                  "key": "modbus.get[tcp://10.5.95.40:502,1,3,9,1,uint16,be]"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
